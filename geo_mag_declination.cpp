@@ -1,6 +1,7 @@
 /****************************************************************************
  *
  *   Copyright (c) 2014-2022 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2025 Mohammad Nikanjam (https://github.com/GitMasterNikanjam). All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -46,7 +47,11 @@
 
 #include "geo_magnetic_tables.hpp"
 
-#include <mathlib/mathlib.h>
+#if defined(__WIN32)
+	#include "../mathlib/mathlib.h"
+#elif defined(STM32)
+	#include <mathlib/mathlib.h>
+#endif
 
 #include <math.h>
 #include <stdint.h>
