@@ -104,6 +104,23 @@
 float get_mag_declination_degrees(float latitude_deg, float longitude_deg);
 
 /**
+ * @brief Calculate magnetic declination for Iran region with higher resolution.
+ *
+ * @details Uses a dedicated 1° resolution grid covering latitude 25°–40° and
+ *          longitude 43°–63°. This provides more accurate results inside Iran
+ *          than the global 10° grid.
+ *
+ * @param latitude_deg  Latitude in degrees (should be within 25–40 for best results).
+ * @param longitude_deg Longitude in degrees (should be within 43–63).
+ *
+ * @return Magnetic declination in degrees.
+ *
+ * @note Input coordinates outside the Iran grid will be clamped to the grid
+ *       boundaries. For locations far outside, use the global function.
+ */
+float get_mag_declination_degrees_iran(float latitude_deg, float longitude_deg);
+
+/**
  * @brief Calculate the magnetic inclination (dip angle) at a given geographic location.
  *
  * @details Magnetic inclination is the angle between the Earth's magnetic field

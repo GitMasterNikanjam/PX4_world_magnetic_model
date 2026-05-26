@@ -66,139 +66,143 @@
 #include "geo_mag_declination.h"
 #include "geo_magnetic_tables.hpp"
 
-#if defined(_WIN32)
-	#include "../mathlib/mathlib.h"
-#else
-	#include <mathlib/mathlib.h>
-#endif
-
 #include <math.h>
 #include <stdint.h>
-
-using math::constrain;
+#include <cstddef>
 
 // ###################################################################################
 
-/**
- * @brief Convert a geographic coordinate to a lookup table index.
- *
- * @details This helper function maps a geographic coordinate value (latitude or
- *          longitude) to the corresponding index in the lookup table grid.
- *          It ensures the value stays within valid table bounds and accounts
- *          for the sampling resolution.
- *
- * @param[in,out] val Pointer to the coordinate value. Will be constrained to
- *                    the valid range [min, max - SAMPLING_RES] to ensure
- *                    (index + 1) stays within table bounds.
- * @param[in] min Minimum valid value for the coordinate (e.g., -90° for latitude).
- * @param[in] max Maximum valid value for the coordinate (e.g., +90° for latitude).
- *
- * @return Zero-based index into the lookup table for the given coordinate.
- *
- * @note The function modifies *val to the constrained value, which is useful
- *       for subsequent calculations.
- *
- * @see get_table_data for usage in interpolation
- */
-static unsigned get_lookup_table_index(float *val, float min, float max)
+template<typename _Tp>
+constexpr _Tp constrain(_Tp val, _Tp min_val, _Tp max_val)
 {
-	/* for the rare case of hitting the bounds exactly
-	 * the rounding logic wouldn't fit, so enforce it.
-	 */
+	return (val < min_val) ? min_val : ((val > max_val) ? max_val : val);
+}
 
-	/* limit to table bounds - required for maxima even when table spans full globe range */
-	/* limit to (table bounds - 1) because bilinear interpolation requires checking (index + 1) */
-	*val = constrain(*val, min, max - SAMPLING_RES);
+// -----------------------------------------------------------------------------
+// Helper functions for global grid (10° resolution, -90..90 lat, -180..180 lon)
+// -----------------------------------------------------------------------------
 
-	return static_cast<unsigned>((-(min) + *val) / SAMPLING_RES);
+/**
+ * @brief Compute table index for a coordinate value on the global grid.
+ *
+ * @param val        Coordinate value (modified to the constrained value used for interpolation).
+ * @param min        Minimum valid coordinate (e.g., -90 for latitude).
+ * @param max        Maximum valid coordinate (e.g., +90 for latitude).
+ * @param res        Grid resolution (SAMPLING_RES).
+ * @return           Zero‑based index into the table.
+ */
+static unsigned get_table_index(float *val, float min, float max, float res)
+{
+    /* Clamp to ensure (index + 1) stays within table bounds */
+    *val = constrain(*val, min, max - res);
+    return static_cast<unsigned>((-(min) + *val) / res);
 }
 
 /**
- * @brief Retrieve and interpolate magnetic field data from the lookup table.
+ * @brief Generic bilinear interpolation for any regular grid.
  *
- * @details This is the core interpolation function that performs bilinear
- *          interpolation on the 2D lookup table to obtain smooth values at
- *          arbitrary geographic coordinates. It handles coordinate wrapping
- *          for longitude, clamps latitude to valid ranges, and uses the four
- *          nearest grid points for interpolation.
- *
- * @param latitude_deg Geographic latitude in degrees.
- *                     Automatically clamped to [-90°, +90°].
- * @param longitude_deg Geographic longitude in degrees.
- *                      Automatically wrapped to [-180°, +180°].
- * @param table[LAT_DIM][LON_DIM] Pointer to the lookup table to use
- *                                 (declination, inclination, or total intensity).
- *
- * @return Interpolated value in the table's native units (scaled integers).
- *
- * @note The return value is in raw table units and must be scaled by the
- *       appropriate factor for physical units (degrees, nanoTesla, etc.).
- *
- * @see get_mag_declination_degrees
- * @see get_mag_inclination_degrees
- * @see get_mag_strength_tesla
- *
- * @warning The function uses floor-based rounding, which is deterministic
- *          but may have edge effects near grid boundaries.
+ * @tparam LAT_DIM   Number of latitude samples.
+ * @tparam LON_DIM   Number of longitude samples.
+ * @param latitude_deg   Input latitude (will be clamped).
+ * @param longitude_deg  Input longitude (will be wrapped to [-180,180] if global).
+ * @param table          The 2D lookup table (stored as int16_t).
+ * @param lat_min        Minimum latitude of the grid.
+ * @param lat_max        Maximum latitude of the grid.
+ * @param lon_min        Minimum longitude of the grid.
+ * @param lon_max        Maximum longitude of the grid.
+ * @param res            Grid resolution (degrees).
+ * @param wrap_lon       If true, longitudes are wrapped to [lon_min, lon_max] (for global grids).
+ * @return               Interpolated value (still in raw table units, not scaled).
  */
-static float get_table_data(float latitude_deg, float longitude_deg, const int16_t table[LAT_DIM][LON_DIM])
+template<size_t LAT_DIM, size_t LON_DIM>
+static float interpolate_table(float latitude_deg, float longitude_deg,
+                               const int16_t (&table)[LAT_DIM][LON_DIM],
+                               float lat_min, float lat_max,
+                               float lon_min, float lon_max,
+                               float res, bool wrap_lon)
 {
-	/* Clamp latitude to valid range */
-	latitude_deg = math::constrain(latitude_deg, SAMPLING_MIN_LAT, SAMPLING_MAX_LAT);
+    // Clamp latitude to grid range
+    latitude_deg = constrain(latitude_deg, lat_min, lat_max);
 
-	/* Wrap longitude to [-180°, +180°] range */
-	if (longitude_deg > SAMPLING_MAX_LON) {
-		longitude_deg -= 360.f;
-	}
+    // Longitude handling
+    if (wrap_lon) {
+        // Wrap to [-180, 180] range (assumes lon_min = -180, lon_max = 180)
+        if (longitude_deg > lon_max) longitude_deg -= 360.0f;
+        if (longitude_deg < lon_min) longitude_deg += 360.0f;
+    }
+    // For non‑wrapping grids (e.g., Iran) we simply clamp.
+    longitude_deg = constrain(longitude_deg, lon_min, lon_max);
 
-	if (longitude_deg < SAMPLING_MIN_LON) {
-		longitude_deg += 360.f;
-	}
+    // Find the lower grid point (floor)
+    float min_lat = floorf(latitude_deg / res) * res;
+    float min_lon = floorf(longitude_deg / res) * res;
 
-	/* round down to nearest sampling resolution */
-	float min_lat = floorf(latitude_deg / SAMPLING_RES) * SAMPLING_RES;
-	float min_lon = floorf(longitude_deg / SAMPLING_RES) * SAMPLING_RES;
+    // Obtain indices using the grid‑specific function (clamps automatically)
+    unsigned min_lat_idx = get_table_index(&min_lat, lat_min, lat_max, res);
+    unsigned min_lon_idx = get_table_index(&min_lon, lon_min, lon_max, res);
 
-	/* find index of nearest low sampling point */
-	unsigned min_lat_index = get_lookup_table_index(&min_lat, SAMPLING_MIN_LAT, SAMPLING_MAX_LAT);
-	unsigned min_lon_index = get_lookup_table_index(&min_lon, SAMPLING_MIN_LON, SAMPLING_MAX_LON);
+    // Fetch the four surrounding grid values
+    const float data_sw = table[min_lat_idx][min_lon_idx];
+    const float data_se = table[min_lat_idx][min_lon_idx + 1];
+    const float data_ne = table[min_lat_idx + 1][min_lon_idx + 1];
+    const float data_nw = table[min_lat_idx + 1][min_lon_idx];
 
-	const float data_sw = table[min_lat_index][min_lon_index];
-	const float data_se = table[min_lat_index][min_lon_index + 1];
-	const float data_ne = table[min_lat_index + 1][min_lon_index + 1];
-	const float data_nw = table[min_lat_index + 1][min_lon_index];
+    // Interpolation factors (clamped to avoid rounding issues)
+    const float lat_scale = constrain((latitude_deg - min_lat) / res, 0.0f, 1.0f);
+    const float lon_scale = constrain((longitude_deg - min_lon) / res, 0.0f, 1.0f);
 
-	/* perform bilinear interpolation on the four grid corners */
-	const float lat_scale = constrain((latitude_deg - min_lat) / SAMPLING_RES, 0.f, 1.f);
-	const float lon_scale = constrain((longitude_deg - min_lon) / SAMPLING_RES, 0.f, 1.f);
+    // Bilinear interpolation
+    const float data_min = lon_scale * (data_se - data_sw) + data_sw;
+    const float data_max = lon_scale * (data_ne - data_nw) + data_nw;
 
-	const float data_min = lon_scale * (data_se - data_sw) + data_sw;
-	const float data_max = lon_scale * (data_ne - data_nw) + data_nw;
-
-	return lat_scale * (data_max - data_min) + data_min;
+    return lat_scale * (data_max - data_min) + data_min;
 }
+
+// -----------------------------------------------------------------------------
+// Public API functions (global grid)
+// -----------------------------------------------------------------------------
 
 float get_mag_declination_degrees(float latitude_deg, float longitude_deg)
 {
-	// table stored as scaled degrees
-	return get_table_data(latitude_deg, longitude_deg, declination_table) * WMM_DECLINATION_SCALE_TO_DEGREES;
+    return interpolate_table(latitude_deg, longitude_deg, declination_table,
+                             SAMPLING_MIN_LAT, SAMPLING_MAX_LAT,
+                             SAMPLING_MIN_LON, SAMPLING_MAX_LON,
+                             SAMPLING_RES, true) * WMM_DECLINATION_SCALE_TO_DEGREES;
 }
 
 float get_mag_inclination_degrees(float latitude_deg, float longitude_deg)
 {
-	// table stored as scaled degrees
-	return get_table_data(latitude_deg, longitude_deg, inclination_table) * WMM_INCLINATION_SCALE_TO_DEGREES;
-}
-
-float get_mag_strength_gauss(float latitude_deg, float longitude_deg)
-{
-	// 1 Gauss = 1e4 Tesla
-	return get_mag_strength_tesla(latitude_deg, longitude_deg) * 1e4f;
+    return interpolate_table(latitude_deg, longitude_deg, inclination_table,
+                             SAMPLING_MIN_LAT, SAMPLING_MAX_LAT,
+                             SAMPLING_MIN_LON, SAMPLING_MAX_LON,
+                             SAMPLING_RES, true) * WMM_INCLINATION_SCALE_TO_DEGREES;
 }
 
 float get_mag_strength_tesla(float latitude_deg, float longitude_deg)
 {
-	// table stored as scaled nanotesla
-	return get_table_data(latitude_deg, longitude_deg, totalintensity_table)
-	       * WMM_TOTALINTENSITY_SCALE_TO_NANOTESLA * 1e-9f;
+    // table stored as scaled nanotesla → convert to Tesla
+    return interpolate_table(latitude_deg, longitude_deg, totalintensity_table,
+                             SAMPLING_MIN_LAT, SAMPLING_MAX_LAT,
+                             SAMPLING_MIN_LON, SAMPLING_MAX_LON,
+                             SAMPLING_RES, true) * WMM_TOTALINTENSITY_SCALE_TO_NANOTESLA * 1e-9f;
+}
+
+float get_mag_strength_gauss(float latitude_deg, float longitude_deg)
+{
+    // 1 Gauss = 1e-4 Tesla
+    return get_mag_strength_tesla(latitude_deg, longitude_deg) * 1e4f;
+}
+
+// -----------------------------------------------------------------------------
+// Iran‑specific function (1° grid, latitude 25–40, longitude 43–63)
+// -----------------------------------------------------------------------------
+
+float get_mag_declination_degrees_iran(float latitude_deg, float longitude_deg)
+{
+    // Use the same generic interpolator with the Iran grid constants.
+    // Note: longitude is NOT wrapped because the Iran grid is a small continuous block.
+    return interpolate_table(latitude_deg, longitude_deg, declination_table_iran,
+                             SAMPLING_MIN_LAT_IRAN, SAMPLING_MAX_LAT_IRAN,
+                             SAMPLING_MIN_LON_IRAN, SAMPLING_MAX_LON_IRAN,
+                             SAMPLING_RES_IRAN, false) * WMM_DECLINATION_SCALE_TO_DEGREES;
 }

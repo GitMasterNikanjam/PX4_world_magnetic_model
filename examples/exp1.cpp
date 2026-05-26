@@ -13,7 +13,7 @@ For run:
 
 int main(void)
 {
-    float dec = get_mag_declination_degrees(35, 51);
+    float dec = get_mag_declination_degrees_iran(35, 51);
 
     std::cout << "declination = " << dec << std::endl;
     return 0;
